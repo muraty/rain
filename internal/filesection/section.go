@@ -19,6 +19,14 @@ type ReadWriterAt interface {
 	io.WriterAt
 }
 
+// verifiedWriterAt is implemented by storage backends that must record bytes
+// which were accepted by verification. Local files already contain those
+// bytes, but sparse remote storage may have returned zeroes for unwritten
+// ranges and needs the verified data written back.
+type verifiedWriterAt interface {
+	WriteVerifiedAt([]byte, int64) (int, error)
+}
+
 // Piece is contiguous sections of files. When piece hashes in torrent file is being calculated
 // all files are concatenated and splitted into pieces in length specified in the torrent file.
 type Piece []FileSection
@@ -77,4 +85,28 @@ func (p Piece) Write(b []byte) (n int, err error) {
 		b = b[m:]
 	}
 	return
+}
+
+// WriteVerified writes verified bytes only to file sections whose storage
+// backend asks for that callback. It returns without changing ordinary local
+// files.
+func (p Piece) WriteVerified(b []byte) error {
+	for _, sec := range p {
+		if sec.Padding {
+			b = b[sec.Length:]
+			continue
+		}
+		data := b[:sec.Length]
+		if file, ok := sec.File.(verifiedWriterAt); ok {
+			n, err := file.WriteVerifiedAt(data, sec.Offset)
+			if err != nil {
+				return err
+			}
+			if n != len(data) {
+				return io.ErrShortWrite
+			}
+		}
+		b = b[sec.Length:]
+	}
+	return nil
 }

@@ -204,6 +204,9 @@ type Config struct {
 	CustomLogHandler log.Handler `yaml:"-"`
 	// Replace default storage provider
 	CustomStorage storage.Provider `yaml:"-"`
+	// POSController enables the POS-backed storage provider. Empty keeps the
+	// existing local file storage provider.
+	POSController string `yaml:"pos-controller"`
 
 	// Enable debugging
 	Debug bool `yaml:"debug"`

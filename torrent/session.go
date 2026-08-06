@@ -23,6 +23,7 @@ import (
 	"github.com/cenkalti/rain/v2/internal/resumer/boltdbresumer"
 	"github.com/cenkalti/rain/v2/internal/semaphore"
 	"github.com/cenkalti/rain/v2/internal/storage"
+	"github.com/cenkalti/rain/v2/internal/storage/posstorage"
 	"github.com/cenkalti/rain/v2/internal/tracker"
 	"github.com/cenkalti/rain/v2/internal/trackermanager"
 	"github.com/juju/ratelimit"
@@ -81,6 +82,14 @@ type Session struct {
 func NewSession(cfg Config) (*Session, error) {
 	if cfg.PortBegin >= cfg.PortEnd {
 		return nil, errors.New("invalid port range")
+	}
+	var posProvider storage.Provider
+	if cfg.CustomStorage == nil && cfg.POSController != "" {
+		provider, err := posstorage.NewProvider(cfg.POSController)
+		if err != nil {
+			return nil, err
+		}
+		posProvider = provider
 	}
 	if cfg.MaxOpenFiles > 0 {
 		err := setNoFile(cfg.MaxOpenFiles)
@@ -199,6 +208,8 @@ func NewSession(cfg Config) (*Session, error) {
 	}
 	if cfg.CustomStorage != nil {
 		c.storage = cfg.CustomStorage
+	} else if posProvider != nil {
+		c.storage = posProvider
 	} else {
 		c.storage = newFileStorageProvider(&cfg)
 	}
@@ -388,6 +399,9 @@ func (s *Session) removeTorrentFromClient(id string) (*Torrent, error) {
 func (s *Session) stopAndRemoveData(t *Torrent, keepData bool) error {
 	t.torrent.Close()
 	s.releasePort(t.torrent.port)
+	if preserve, ok := t.torrent.storage.(storage.PreserveOnRemove); ok && preserve.PreserveOnRemove() {
+		return nil
+	}
 	if keepData {
 		return nil
 	}

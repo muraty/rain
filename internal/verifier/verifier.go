@@ -58,6 +58,9 @@ func (v *Verifier) Run(pieces []piece.Piece, progressC chan Progress, resultC ch
 		}
 		ok := p.VerifyHash(buf, hash)
 		if ok {
+			if v.Error = p.Data.WriteVerified(buf); v.Error != nil {
+				return
+			}
 			v.Bitfield.Set(p.Index)
 			numOK++
 		}
