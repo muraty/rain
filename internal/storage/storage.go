@@ -1,7 +1,10 @@
 // Package storage contains an interface for reading and writing files in a torrent.
 package storage
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // Storage is an interface for reading/writing torrent files.
 type Storage interface {
@@ -22,4 +25,35 @@ type File interface {
 type Provider interface {
 	// GetStorage returns a storage for a torrent.
 	GetStorage(torrentID string) (Storage, error)
+}
+
+// Manifest describes the complete ordered torrent byte stream before files
+// are opened. Storage backends that need one operation for the whole torrent
+// may implement Preparer.
+type Manifest struct {
+	TorrentID   string
+	InfoHash    string
+	Name        string
+	PieceLength int64
+	PieceCount  int
+	TotalSize   int64
+	Files       []ManifestFile
+}
+
+type ManifestFile struct {
+	Index        int
+	Path         string
+	Size         int64
+	GlobalOffset int64
+	Padding      bool
+}
+
+type Preparer interface {
+	Prepare(context.Context, Manifest) error
+}
+
+// PreserveOnRemove is implemented by storage whose content lifecycle is not
+// owned by Rain. Removing the Rain session only detaches it.
+type PreserveOnRemove interface {
+	PreserveOnRemove() bool
 }

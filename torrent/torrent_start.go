@@ -1,6 +1,9 @@
 package torrent
 
 import (
+	"context"
+	"encoding/hex"
+	"fmt"
 	"net"
 
 	"github.com/cenkalti/rain/v2/internal/acceptor"
@@ -9,6 +12,7 @@ import (
 	"github.com/cenkalti/rain/v2/internal/peer"
 	"github.com/cenkalti/rain/v2/internal/piecedownloader"
 	"github.com/cenkalti/rain/v2/internal/piecepicker"
+	"github.com/cenkalti/rain/v2/internal/storage"
 	"github.com/cenkalti/rain/v2/internal/tracker"
 	"github.com/cenkalti/rain/v2/internal/urldownloader"
 	"github.com/cenkalti/rain/v2/internal/verifier"
@@ -71,8 +75,29 @@ func (t *torrent) startAllocator() {
 	if t.allocator != nil {
 		t.crash("allocator exists")
 	}
+	var prepare func(context.Context) error
+	if preparer, ok := t.storage.(storage.Preparer); ok {
+		manifest := storage.Manifest{
+			TorrentID: t.id, InfoHash: hex.EncodeToString(t.infoHash[:]), Name: t.info.Name,
+			PieceLength: int64(t.info.PieceLength), PieceCount: int(t.info.NumPieces), TotalSize: t.info.Length,
+			Files: make([]storage.ManifestFile, len(t.info.Files)),
+		}
+		var offset int64
+		for i, file := range t.info.Files {
+			manifest.Files[i] = storage.ManifestFile{
+				Index: i, Path: file.Path, Size: file.Length, GlobalOffset: offset, Padding: file.Padding,
+			}
+			offset += file.Length
+		}
+		prepare = func(ctx context.Context) error {
+			if err := preparer.Prepare(ctx, manifest); err != nil {
+				return fmt.Errorf("preparing storage: %w", err)
+			}
+			return nil
+		}
+	}
 	t.allocator = allocator.New()
-	go t.allocator.Run(t.info, t.storage, t.allocatorProgressC, t.allocatorResultC)
+	go t.allocator.RunWithPrepare(t.info, t.storage, prepare, t.allocatorProgressC, t.allocatorResultC)
 }
 
 func (t *torrent) addFixedPeers() {
