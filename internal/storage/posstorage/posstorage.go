@@ -323,20 +323,33 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *File) readRange(p []byte, off int64) (int, error) {
-	resp, err := doRequest(f.ctx, f.client, http.MethodGet, f.readURL(off, int64(len(p))), "", nil)
-	if err != nil {
-		return 0, fmt.Errorf("reading POS range: %w", err)
+	requestURL := f.readURL(off, int64(len(p)))
+	for attempt := 0; ; attempt++ {
+		delay := retryDelays[min(attempt, len(retryDelays)-1)]
+		if delay > 0 {
+			select {
+			case <-f.ctx.Done():
+				return 0, f.ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		resp, err := doRequest(f.ctx, f.client, http.MethodGet, requestURL, "", nil)
+		if err != nil {
+			return 0, fmt.Errorf("reading POS range: %w", err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			return 0, fmt.Errorf("reading POS range: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(message)))
+		}
+		n, err := io.ReadFull(resp.Body, p)
+		resp.Body.Close()
+		if err == nil {
+			return n, nil
+		}
+		// A body that ends early or breaks mid-read is a connection failure
+		// after a good status; retry it like any transport error.
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return 0, fmt.Errorf("reading POS range: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(message)))
-	}
-	n, err := io.ReadFull(resp.Body, p)
-	if err != nil {
-		return n, err
-	}
-	return n, nil
 }
 
 func doRequest(ctx context.Context, client *http.Client, method, requestURL, contentType string, body []byte) (*http.Response, error) {

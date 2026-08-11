@@ -53,6 +53,40 @@ func TestFileWritesMapFileOffsetToTorrentOffset(t *testing.T) {
 	}
 }
 
+func TestFileReadRetriesTruncatedBody(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Length", "4")
+		if requests == 1 {
+			// Fewer bytes than Content-Length: the server closes the
+			// connection and the client sees a truncated body.
+			w.Write([]byte("ra"))
+			return
+		}
+		w.Write([]byte("rain"))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	file := &File{
+		downloadID: 7, storeURL: server.URL, globalOffset: 100, size: 200,
+		client: server.Client(), ctx: ctx, cancel: cancel,
+	}
+	buf := make([]byte, 4)
+	n, err := file.ReadAt(buf, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 || string(buf) != "rain" {
+		t.Fatalf("read %d bytes %q, want 4 bytes \"rain\"", n, buf)
+	}
+	if requests != 2 {
+		t.Fatalf("read sent %d requests, want 2", requests)
+	}
+}
+
 func TestFileWriteRejectsRangeOutsideFile(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
