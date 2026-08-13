@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -93,6 +94,9 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 	if restored.DownloadID < 0 {
 		return nil, fmt.Errorf("invalid persisted POS download id %d", restored.DownloadID)
 	}
+	if restored.Rejected && restored.DownloadID != 0 {
+		return nil, fmt.Errorf("persisted POS registration is rejected but has download id %d", restored.DownloadID)
+	}
 	if len(restored.Body) > 0 {
 		if err := json.Unmarshal(restored.Body, &s.registrationRequest); err != nil {
 			return nil, fmt.Errorf("decoding persisted POS registration body: %w", err)
@@ -102,10 +106,11 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 		}
 		s.registrationBody = bytes.Clone(restored.Body)
 	}
-	if len(s.registrationBody) > 0 || restored.DownloadID > 0 {
+	if len(s.registrationBody) > 0 || restored.DownloadID > 0 || restored.Rejected {
 		s.registrationState = registrationCompleted
 	}
 	s.downloadID = restored.DownloadID
+	s.registrationRejected = restored.Rejected
 	return s, nil
 }
 
@@ -123,6 +128,7 @@ type Storage struct {
 	registrationState     registrationState
 	registrationRequest   createRequest
 	registrationBody      []byte
+	registrationRejected  bool
 	cancellationConfirmed bool
 	registrationCtx       context.Context
 	cancelRegistration    context.CancelFunc
@@ -150,7 +156,10 @@ const (
 type persistedRegistration struct {
 	Body       []byte `json:"body,omitempty"`
 	DownloadID int64  `json:"download_id,omitempty"`
+	Rejected   bool   `json:"rejected,omitempty"`
 }
+
+var errRegistrationRejected = errors.New("POS registration definitively rejected")
 
 type createRequest struct {
 	RainTorrentID string           `json:"rain_torrent_id"`
@@ -189,6 +198,9 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 	defer s.registrationMu.Unlock()
 	if s.canceled {
 		return fmt.Errorf("POS storage registration canceled")
+	}
+	if s.registrationRejected {
+		return errRegistrationRejected
 	}
 	s.mu.Lock()
 	if s.prepared {
@@ -242,6 +254,12 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 	cancel()
 	s.registrationState = registrationCompleted
 	if err != nil {
+		if errors.Is(err, errRegistrationRejected) && s.POSDownloadID() == 0 {
+			s.registrationRejected = true
+			if persistErr := s.persistRegistration(0); persistErr != nil {
+				return errors.Join(err, fmt.Errorf("persisting rejected POS registration: %w", persistErr))
+			}
+		}
 		return err
 	}
 	if downloadID := s.POSDownloadID(); downloadID != 0 && downloadID != result.ID {
@@ -258,6 +276,7 @@ func (s *Storage) persistRegistration(downloadID int64) error {
 	state, err := json.Marshal(persistedRegistration{
 		Body:       s.registrationBody,
 		DownloadID: downloadID,
+		Rejected:   s.registrationRejected,
 	})
 	if err != nil {
 		return err
@@ -277,6 +296,11 @@ func (s *Storage) register(ctx context.Context, retry bool) (createResponse, boo
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if resp.StatusCode == http.StatusBadRequest {
+			// The POS controller contract guarantees that HTTP 400 rejects the
+			// request before creating a download.
+			return createResponse{}, false, fmt.Errorf("%w: HTTP %d: %s", errRegistrationRejected, resp.StatusCode, strings.TrimSpace(string(message)))
+		}
 		return createResponse{}, false, fmt.Errorf("registering POS rain download: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(message)))
 	}
 	var result createResponse
@@ -321,6 +345,10 @@ func (s *Storage) Cancel(ctx context.Context) error {
 	if s.cancellationConfirmed {
 		return nil
 	}
+	if s.registrationRejected {
+		s.cancellationConfirmed = true
+		return nil
+	}
 	s.mu.RLock()
 	downloadID := s.downloadID
 	s.mu.RUnlock()
@@ -335,6 +363,10 @@ func (s *Storage) Cancel(ctx context.Context) error {
 		downloadID, err = s.recoverRegistration(ctx)
 		if err != nil {
 			return err
+		}
+		if s.registrationRejected {
+			s.cancellationConfirmed = true
+			return nil
 		}
 	}
 	if err := s.cancelDownload(ctx, downloadID); err != nil {
@@ -351,6 +383,13 @@ func (s *Storage) recoverRegistration(ctx context.Context) (int64, error) {
 	result, existing, err := s.register(ctx, false)
 	s.registrationState = registrationCompleted
 	if err != nil {
+		if errors.Is(err, errRegistrationRejected) {
+			s.registrationRejected = true
+			if persistErr := s.persistRegistration(0); persistErr != nil {
+				return 0, errors.Join(err, fmt.Errorf("persisting rejected POS registration: %w", persistErr))
+			}
+			return 0, nil
+		}
 		return 0, fmt.Errorf("recovering ambiguous POS registration: %w", err)
 	}
 	if err := s.persistRegistration(result.ID); err != nil {
