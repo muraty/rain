@@ -52,6 +52,14 @@ type Preparer interface {
 	Prepare(context.Context, Manifest) error
 }
 
+// Canceler is implemented by storage backends that own an external resource
+// which must be canceled before Rain forgets the torrent. Cancel must be safe
+// to call concurrently and repeatedly. A returned error means cancellation was
+// not confirmed and the torrent must not be removed.
+type Canceler interface {
+	Cancel(context.Context) error
+}
+
 // PreserveOnRemove is implemented by storage whose content lifecycle is not
 // owned by Rain. Removing the Rain session only detaches it.
 type PreserveOnRemove interface {

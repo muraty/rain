@@ -61,9 +61,15 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 }
 
 type Storage struct {
-	// prepareMu serializes Prepare calls so concurrent callers cannot both
-	// register the download; mu alone is released around the HTTP request.
-	prepareMu     sync.Mutex
+	// registrationMu orders Prepare and Cancel. If registration is running,
+	// cancellation waits for its outcome before acting on the returned ID.
+	registrationMu        sync.Mutex
+	canceled              bool
+	registrationState     registrationState
+	registrationRequest   createRequest
+	registrationBody      []byte
+	cancellationConfirmed bool
+
 	mu            sync.RWMutex
 	controllerURL string
 	torrentID     string
@@ -74,6 +80,14 @@ type Storage struct {
 	files         map[string]fileMetadata
 	client        *http.Client
 }
+
+type registrationState uint8
+
+const (
+	registrationNotStarted registrationState = iota
+	registrationRunning
+	registrationCompleted
+)
 
 type createRequest struct {
 	RainTorrentID string           `json:"rain_torrent_id"`
@@ -108,8 +122,11 @@ type fileMetadata struct {
 }
 
 func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error {
-	s.prepareMu.Lock()
-	defer s.prepareMu.Unlock()
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if s.canceled {
+		return fmt.Errorf("POS storage registration canceled")
+	}
 	s.mu.Lock()
 	if s.prepared {
 		// Rain can close and reopen one torrent without recreating its Storage.
@@ -120,44 +137,68 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 		return nil
 	}
 	s.mu.Unlock()
-	request := createRequest{
-		RainTorrentID: manifest.TorrentID,
-		InfoHash:      manifest.InfoHash,
-		TotalSize:     manifest.TotalSize,
-		Metadata: downloadMetadata{
-			Name: manifest.Name, PieceLength: manifest.PieceLength, PieceCount: manifest.PieceCount,
-			Files: make([]fileMetadata, len(manifest.Files)),
-		},
-	}
-	for i, file := range manifest.Files {
-		request.Metadata.Files[i] = fileMetadata{
-			Index: file.Index, Path: file.Path, Size: file.Size,
-			GlobalOffset: file.GlobalOffset, Padding: file.Padding,
+	if s.registrationBody == nil {
+		request := createRequest{
+			RainTorrentID: manifest.TorrentID,
+			InfoHash:      manifest.InfoHash,
+			TotalSize:     manifest.TotalSize,
+			Metadata: downloadMetadata{
+				Name: manifest.Name, PieceLength: manifest.PieceLength, PieceCount: manifest.PieceCount,
+				Files: make([]fileMetadata, len(manifest.Files)),
+			},
 		}
+		for i, file := range manifest.Files {
+			request.Metadata.Files[i] = fileMetadata{
+				Index: file.Index, Path: file.Path, Size: file.Size,
+				GlobalOffset: file.GlobalOffset, Padding: file.Padding,
+			}
+		}
+		body, err := json.Marshal(request)
+		if err != nil {
+			return err
+		}
+		s.registrationRequest = request
+		s.registrationBody = body
 	}
-	body, err := json.Marshal(request)
+
+	s.registrationState = registrationRunning
+	result, existing, err := s.register(ctx, true)
+	s.registrationState = registrationCompleted
 	if err != nil {
 		return err
 	}
-	resp, err := doRequest(ctx, s.client, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", body)
+	s.saveRegistration(result, existing)
+	return nil
+}
+
+func (s *Storage) register(ctx context.Context, retry bool) (createResponse, bool, error) {
+	request := doRequestOnce
+	if retry {
+		request = doRequest
+	}
+	resp, err := request(ctx, s.client, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", s.registrationBody)
 	if err != nil {
-		return fmt.Errorf("registering POS rain download: %w", err)
+		return createResponse{}, false, fmt.Errorf("registering POS rain download: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return fmt.Errorf("registering POS rain download: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(message)))
+		return createResponse{}, false, fmt.Errorf("registering POS rain download: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(message)))
 	}
 	var result createResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding POS rain download: %w", err)
+		return createResponse{}, false, fmt.Errorf("decoding POS rain download: %w", err)
 	}
 	if result.ID <= 0 || result.StoreURL == "" {
-		return fmt.Errorf("POS returned incomplete rain download identity")
+		return createResponse{}, false, fmt.Errorf("POS returned incomplete rain download identity")
 	}
-	if err := validateCreateResponse(request, result); err != nil {
-		return fmt.Errorf("validating POS rain download: %w", err)
+	if err := validateCreateResponse(s.registrationRequest, result); err != nil {
+		return createResponse{}, false, fmt.Errorf("validating POS rain download: %w", err)
 	}
+	return result, resp.StatusCode == http.StatusOK, nil
+}
+
+func (s *Storage) saveRegistration(result createResponse, existing bool) {
 	files := make(map[string]fileMetadata)
 	for _, file := range result.Metadata.Files {
 		if !file.Padding {
@@ -167,10 +208,71 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 	s.mu.Lock()
 	s.downloadID = result.ID
 	s.storeURL = strings.TrimRight(result.StoreURL, "/")
-	s.existing = resp.StatusCode == http.StatusOK
+	s.existing = existing
 	s.files = files
 	s.prepared = true
 	s.mu.Unlock()
+}
+
+// Cancel prevents future registration and confirms that any registration
+// which may already have reached POS is canceled. registrationMu makes this
+// operation idempotent and makes concurrent callers share one outcome.
+func (s *Storage) Cancel(ctx context.Context) error {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	s.canceled = true
+	if s.cancellationConfirmed {
+		return nil
+	}
+	if s.registrationState == registrationNotStarted {
+		// Prepare cannot begin while registrationMu is held, so no POS
+		// download can exist in this state.
+		s.cancellationConfirmed = true
+		return nil
+	}
+
+	s.mu.RLock()
+	downloadID := s.downloadID
+	s.mu.RUnlock()
+	if downloadID == 0 {
+		var err error
+		downloadID, err = s.recoverRegistration(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if err := s.cancelDownload(ctx, downloadID); err != nil {
+		return err
+	}
+	s.cancellationConfirmed = true
+	return nil
+}
+
+func (s *Storage) recoverRegistration(ctx context.Context) (int64, error) {
+	// A failed registration is ambiguous: POS may have committed it and lost
+	// the response. Repeat the same idempotent request to recover its ID.
+	s.registrationState = registrationRunning
+	result, existing, err := s.register(ctx, false)
+	s.registrationState = registrationCompleted
+	if err != nil {
+		return 0, fmt.Errorf("recovering ambiguous POS registration: %w", err)
+	}
+	s.saveRegistration(result, existing)
+	return result.ID, nil
+}
+
+func (s *Storage) cancelDownload(ctx context.Context, downloadID int64) error {
+	requestURL := s.controllerURL + "/v2/rain/downloads/" + strconv.FormatInt(downloadID, 10) + "/cancel"
+	resp, err := doRequestOnce(ctx, s.client, http.MethodPost, requestURL, "", nil)
+	if err != nil {
+		return fmt.Errorf("canceling POS rain download %d: %w", downloadID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return fmt.Errorf("canceling POS rain download %d: HTTP %d: %s", downloadID, resp.StatusCode, strings.TrimSpace(string(message)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -362,18 +464,7 @@ func doRequest(ctx context.Context, client *http.Client, method, requestURL, con
 			case <-time.After(delay):
 			}
 		}
-		var reader io.Reader
-		if body != nil {
-			reader = bytes.NewReader(body)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, requestURL, reader)
-		if err != nil {
-			return nil, err
-		}
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-		}
-		resp, err := client.Do(req)
+		resp, err := doRequestOnce(ctx, client, method, requestURL, contentType, body)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, err
@@ -388,6 +479,21 @@ func doRequest(ctx context.Context, client *http.Client, method, requestURL, con
 		}
 		return resp, nil
 	}
+}
+
+func doRequestOnce(ctx context.Context, client *http.Client, method, requestURL, contentType string, body []byte) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, reader)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return client.Do(req)
 }
 
 func (f *File) writeURL(off, length int64) string {
@@ -412,5 +518,6 @@ func (f *File) Close() error {
 var _ storage.Provider = (*Provider)(nil)
 var _ storage.Storage = (*Storage)(nil)
 var _ storage.Preparer = (*Storage)(nil)
+var _ storage.Canceler = (*Storage)(nil)
 var _ storage.PreserveOnRemove = (*Storage)(nil)
 var _ storage.File = (*File)(nil)

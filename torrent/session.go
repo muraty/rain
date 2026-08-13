@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -359,9 +360,24 @@ func (s *Session) RemoveTorrent(id string, keepData bool) error {
 }
 
 func (s *Session) removeTorrentFromClient(id string) (*Torrent, error) {
-	s.mTorrents.Lock()
+	// Storage cancellation may block on an in-flight registration, so take a
+	// stable pointer without holding mTorrents across the external operation.
+	s.mTorrents.RLock()
 	t, ok := s.torrents[id]
+	s.mTorrents.RUnlock()
 	if !ok {
+		return nil, nil
+	}
+	if canceler, ok := t.torrent.storage.(storage.Canceler); ok {
+		if err := canceler.Cancel(context.Background()); err != nil {
+			return nil, fmt.Errorf("canceling storage for torrent %s: %w", id, err)
+		}
+	}
+
+	s.mTorrents.Lock()
+	// Another concurrent removal may have completed while cancellation was in
+	// progress. Only the caller that still owns this map entry discards it.
+	if current, ok := s.torrents[id]; !ok || current != t {
 		s.mTorrents.Unlock()
 		return nil, nil
 	}
