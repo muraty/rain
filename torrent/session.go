@@ -86,7 +86,7 @@ func NewSession(cfg Config) (*Session, error) {
 	}
 	var posProvider *posstorage.Provider
 	if cfg.CustomStorage == nil && cfg.POSController != "" {
-		provider, err := posstorage.NewProvider(cfg.POSController)
+		provider, err := posstorage.NewProvider(cfg.POSController, cfg.POSControllerTimeout)
 		if err != nil {
 			return nil, err
 		}

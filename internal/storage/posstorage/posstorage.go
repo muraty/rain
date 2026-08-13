@@ -42,7 +42,7 @@ var retryDelays = []time.Duration{
 	15 * time.Second,
 }
 
-func NewProvider(controllerURL string) (*Provider, error) {
+func NewProvider(controllerURL string, timeout time.Duration) (*Provider, error) {
 	controllerURL = strings.TrimRight(controllerURL, "/")
 	parsed, err := url.Parse(controllerURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -52,7 +52,7 @@ func NewProvider(controllerURL string) (*Provider, error) {
 	transport.MaxIdleConnsPerHost = 32
 	return &Provider{
 		controllerURL: controllerURL,
-		client:        &http.Client{Transport: transport, Timeout: 5 * time.Minute},
+		client:        &http.Client{Transport: transport, Timeout: timeout},
 	}, nil
 }
 

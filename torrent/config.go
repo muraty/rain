@@ -207,6 +207,8 @@ type Config struct {
 	// POSController enables the POS-backed storage provider. Empty keeps the
 	// existing local file storage provider.
 	POSController string `yaml:"pos-controller"`
+	// Total timeout for each request to the POS controller.
+	POSControllerTimeout time.Duration `yaml:"pos-controller-timeout"`
 
 	// Enable debugging
 	Debug bool `yaml:"debug"`
@@ -305,4 +307,7 @@ var DefaultConfig = Config{
 	WebseedVerifyTLS:               true,
 	WebseedMaxSources:              10,
 	WebseedMaxDownloads:            4,
+
+	// POS
+	POSControllerTimeout: 30 * time.Second,
 }
