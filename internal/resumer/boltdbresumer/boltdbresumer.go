@@ -2,6 +2,7 @@
 package boltdbresumer
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"runtime/debug"
@@ -36,6 +37,7 @@ var Keys = struct {
 	CompleteCmdRun    []byte
 	Sequential        []byte
 	Version           []byte
+	StorageState      []byte
 }{
 	InfoHash:          []byte("info_hash"),
 	Port:              []byte("port"),
@@ -57,6 +59,7 @@ var Keys = struct {
 	CompleteCmdRun:    []byte("complete_cmd_run"),
 	Sequential:        []byte("sequential"),
 	Version:           []byte("version"),
+	StorageState:      []byte("storage_state"),
 }
 
 // Resumer contains methods for saving/loading resume information of a torrent to a BoltDB database.
@@ -157,6 +160,32 @@ func (r *Resumer) WriteBitfield(torrentID string, value []byte) error {
 func (r *Resumer) WriteStarted(torrentID string, value bool) error {
 	return r.update(torrentID, func(b *bbolt.Bucket) error {
 		return b.Put(Keys.Started, []byte(strconv.FormatBool(value)))
+	})
+}
+
+// ReadStorageState returns opaque state owned by the torrent's storage.
+func (r *Resumer) ReadStorageState(torrentID string) ([]byte, error) {
+	var state []byte
+	err := r.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(r.bucket).Bucket([]byte(torrentID))
+		if b == nil {
+			return nil
+		}
+		state = bytes.Clone(b.Get(Keys.StorageState))
+		return nil
+	})
+	return state, err
+}
+
+// WriteStorageState durably replaces opaque state owned by the torrent's
+// storage. It fails if the torrent no longer exists.
+func (r *Resumer) WriteStorageState(torrentID string, state []byte) error {
+	return r.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(r.bucket).Bucket([]byte(torrentID))
+		if b == nil {
+			return fmt.Errorf("torrent bucket not found: %q", torrentID)
+		}
+		return b.Put(Keys.StorageState, state)
 	})
 }
 

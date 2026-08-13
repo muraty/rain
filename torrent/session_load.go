@@ -167,6 +167,10 @@ func (s *Session) CompactDatabase(output string) error {
 			s.log.Warningf("skipping torrent %s: info is nil", t.torrent.id)
 			continue
 		}
+		storageState, err := s.resumer.ReadStorageState(t.torrent.id)
+		if err != nil {
+			return err
+		}
 		spec := &boltdbresumer.Spec{
 			InfoHash:          t.torrent.InfoHash(),
 			Port:              t.torrent.port,
@@ -190,6 +194,11 @@ func (s *Session) CompactDatabase(output string) error {
 		err = res.Write(t.torrent.id, spec)
 		if err != nil {
 			return err
+		}
+		if len(storageState) > 0 {
+			if err := res.WriteStorageState(t.torrent.id, storageState); err != nil {
+				return err
+			}
 		}
 	}
 	return db.Close()

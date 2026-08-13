@@ -84,7 +84,7 @@ func NewSession(cfg Config) (*Session, error) {
 	if cfg.PortBegin >= cfg.PortEnd {
 		return nil, errors.New("invalid port range")
 	}
-	var posProvider storage.Provider
+	var posProvider *posstorage.Provider
 	if cfg.CustomStorage == nil && cfg.POSController != "" {
 		provider, err := posstorage.NewProvider(cfg.POSController)
 		if err != nil {
@@ -145,6 +145,9 @@ func NewSession(cfg Config) (*Session, error) {
 	res, err := boltdbresumer.New(db, torrentsBucket)
 	if err != nil {
 		return nil, err
+	}
+	if posProvider != nil {
+		posProvider.SetStateStore(res)
 	}
 	var dhtNode *dht.DHT
 	if cfg.DHTEnabled {

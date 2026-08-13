@@ -19,9 +19,17 @@ import (
 type Provider struct {
 	controllerURL string
 	client        *http.Client
+	stateStore    StateStore
 }
 
 const maxPOSRangeSize = 128 << 20
+
+// StateStore persists opaque POS registration state. POS storage owns the
+// bytes and their format.
+type StateStore interface {
+	ReadStorageState(torrentID string) ([]byte, error)
+	WriteStorageState(torrentID string, state []byte) error
+}
 
 var retryDelays = []time.Duration{
 	0,
@@ -52,12 +60,59 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 	if torrentID == "" {
 		return nil, fmt.Errorf("empty torrent id")
 	}
-	return &Storage{
+	var state []byte
+	if p.stateStore != nil {
+		var err error
+		state, err = p.stateStore.ReadStorageState(torrentID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	registrationCtx, cancelRegistration := context.WithCancel(context.Background())
+	s := &Storage{
 		controllerURL: p.controllerURL,
 		torrentID:     torrentID,
 		client:        p.client,
 		files:         make(map[string]fileMetadata),
-	}, nil
+		persist: func(value []byte) error {
+			if p.stateStore == nil {
+				return nil
+			}
+			return p.stateStore.WriteStorageState(torrentID, value)
+		},
+		registrationCtx:    registrationCtx,
+		cancelRegistration: cancelRegistration,
+	}
+	if len(state) == 0 {
+		return s, nil
+	}
+	var restored persistedRegistration
+	if err := json.Unmarshal(state, &restored); err != nil {
+		return nil, fmt.Errorf("decoding POS registration state: %w", err)
+	}
+	if restored.DownloadID < 0 {
+		return nil, fmt.Errorf("invalid persisted POS download id %d", restored.DownloadID)
+	}
+	if len(restored.Body) > 0 {
+		if err := json.Unmarshal(restored.Body, &s.registrationRequest); err != nil {
+			return nil, fmt.Errorf("decoding persisted POS registration body: %w", err)
+		}
+		if s.registrationRequest.RainTorrentID != torrentID {
+			return nil, fmt.Errorf("persisted POS registration has torrent id %q, want %q", s.registrationRequest.RainTorrentID, torrentID)
+		}
+		s.registrationBody = bytes.Clone(restored.Body)
+	}
+	if len(s.registrationBody) > 0 || restored.DownloadID > 0 {
+		s.registrationState = registrationCompleted
+	}
+	s.downloadID = restored.DownloadID
+	return s, nil
+}
+
+// SetStateStore configures durable registration state before any torrent is
+// restored or started.
+func (p *Provider) SetStateStore(store StateStore) {
+	p.stateStore = store
 }
 
 type Storage struct {
@@ -69,6 +124,9 @@ type Storage struct {
 	registrationRequest   createRequest
 	registrationBody      []byte
 	cancellationConfirmed bool
+	registrationCtx       context.Context
+	cancelRegistration    context.CancelFunc
+	persist               func([]byte) error
 
 	mu            sync.RWMutex
 	controllerURL string
@@ -88,6 +146,11 @@ const (
 	registrationRunning
 	registrationCompleted
 )
+
+type persistedRegistration struct {
+	Body       []byte `json:"body,omitempty"`
+	DownloadID int64  `json:"download_id,omitempty"`
+}
 
 type createRequest struct {
 	RainTorrentID string           `json:"rain_torrent_id"`
@@ -138,8 +201,11 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 	}
 	s.mu.Unlock()
 	if s.registrationBody == nil {
+		if manifest.TorrentID != s.torrentID {
+			return fmt.Errorf("POS manifest has torrent id %q, want %q", manifest.TorrentID, s.torrentID)
+		}
 		request := createRequest{
-			RainTorrentID: manifest.TorrentID,
+			RainTorrentID: s.torrentID,
 			InfoHash:      manifest.InfoHash,
 			TotalSize:     manifest.TotalSize,
 			Metadata: downloadMetadata{
@@ -159,16 +225,44 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 		}
 		s.registrationRequest = request
 		s.registrationBody = body
+		if err := s.persistRegistration(s.POSDownloadID()); err != nil {
+			// No POST has started. Forget the in-memory body so a later Prepare
+			// must persist it successfully before trying registration.
+			s.registrationRequest = createRequest{}
+			s.registrationBody = nil
+			return fmt.Errorf("persisting POS registration request: %w", err)
+		}
 	}
 
 	s.registrationState = registrationRunning
-	result, existing, err := s.register(ctx, true)
+	requestCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.registrationCtx, cancel)
+	result, existing, err := s.register(requestCtx, true)
+	stop()
+	cancel()
 	s.registrationState = registrationCompleted
 	if err != nil {
 		return err
 	}
+	if downloadID := s.POSDownloadID(); downloadID != 0 && downloadID != result.ID {
+		return fmt.Errorf("POS download id changed from %d to %d", downloadID, result.ID)
+	}
+	if err := s.persistRegistration(result.ID); err != nil {
+		return fmt.Errorf("persisting POS download id %d: %w", result.ID, err)
+	}
 	s.saveRegistration(result, existing)
 	return nil
+}
+
+func (s *Storage) persistRegistration(downloadID int64) error {
+	state, err := json.Marshal(persistedRegistration{
+		Body:       s.registrationBody,
+		DownloadID: downloadID,
+	})
+	if err != nil {
+		return err
+	}
+	return s.persist(state)
 }
 
 func (s *Storage) register(ctx context.Context, retry bool) (createResponse, bool, error) {
@@ -218,22 +312,24 @@ func (s *Storage) saveRegistration(result createResponse, existing bool) {
 // which may already have reached POS is canceled. registrationMu makes this
 // operation idempotent and makes concurrent callers share one outcome.
 func (s *Storage) Cancel(ctx context.Context) error {
+	// This signal does not require registrationMu, so it interrupts Prepare's
+	// active HTTP request before Cancel waits for Prepare to release the mutex.
+	s.cancelRegistration()
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
 	s.canceled = true
 	if s.cancellationConfirmed {
 		return nil
 	}
-	if s.registrationState == registrationNotStarted {
-		// Prepare cannot begin while registrationMu is held, so no POS
-		// download can exist in this state.
-		s.cancellationConfirmed = true
-		return nil
-	}
-
 	s.mu.RLock()
 	downloadID := s.downloadID
 	s.mu.RUnlock()
+	if downloadID == 0 && len(s.registrationBody) == 0 {
+		// The registration body is persisted before any POST. Without a body
+		// or an ID, no POS download can have been created.
+		s.cancellationConfirmed = true
+		return nil
+	}
 	if downloadID == 0 {
 		var err error
 		downloadID, err = s.recoverRegistration(ctx)
@@ -256,6 +352,9 @@ func (s *Storage) recoverRegistration(ctx context.Context) (int64, error) {
 	s.registrationState = registrationCompleted
 	if err != nil {
 		return 0, fmt.Errorf("recovering ambiguous POS registration: %w", err)
+	}
+	if err := s.persistRegistration(result.ID); err != nil {
+		return 0, fmt.Errorf("persisting recovered POS download id %d: %w", result.ID, err)
 	}
 	s.saveRegistration(result, existing)
 	return result.ID, nil
