@@ -60,6 +60,11 @@ type Canceler interface {
 	Cancel(context.Context) error
 }
 
+// POSDownloadIDProvider is implemented by POS-backed storage after registration.
+type POSDownloadIDProvider interface {
+	POSDownloadID() int64
+}
+
 // PreserveOnRemove is implemented by storage whose content lifecycle is not
 // owned by Rain. Removing the Rain session only detaches it.
 type PreserveOnRemove interface {

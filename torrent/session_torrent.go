@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/rain/v2/internal/resumer/boltdbresumer"
+	"github.com/cenkalti/rain/v2/internal/storage"
 	"github.com/cenkalti/rain/v2/internal/tracker"
 	"go.etcd.io/bbolt"
 )
@@ -46,6 +47,16 @@ func (t *Torrent) Name() string {
 // Dir returns the directory that contains the files in the torrent.
 func (t *Torrent) Dir() string {
 	return t.torrent.Dir()
+}
+
+// POSDownloadID returns the numeric POS download ID. It returns zero while
+// POS registration is pending or when this torrent does not use POS storage.
+func (t *Torrent) POSDownloadID() int64 {
+	provider, ok := t.torrent.storage.(storage.POSDownloadIDProvider)
+	if !ok {
+		return 0
+	}
+	return provider.POSDownloadID()
 }
 
 // Files in the torrent. An error is returned when metainfo isn't ready.

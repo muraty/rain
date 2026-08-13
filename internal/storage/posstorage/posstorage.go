@@ -336,6 +336,13 @@ func (s *Storage) RootDir() string {
 	return "pos://" + strconv.FormatInt(s.downloadID, 10)
 }
 
+// POSDownloadID returns the numeric POS download ID, or zero until registration completes.
+func (s *Storage) POSDownloadID() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.downloadID
+}
+
 func (s *Storage) PreserveOnRemove() bool { return true }
 
 type File struct {
@@ -519,5 +526,6 @@ var _ storage.Provider = (*Provider)(nil)
 var _ storage.Storage = (*Storage)(nil)
 var _ storage.Preparer = (*Storage)(nil)
 var _ storage.Canceler = (*Storage)(nil)
+var _ storage.POSDownloadIDProvider = (*Storage)(nil)
 var _ storage.PreserveOnRemove = (*Storage)(nil)
 var _ storage.File = (*File)(nil)
