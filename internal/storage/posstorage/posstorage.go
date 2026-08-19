@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/rain/v2/internal/logger"
 	"github.com/cenkalti/rain/v2/internal/storage"
 )
 
@@ -74,6 +75,7 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 		controllerURL: p.controllerURL,
 		torrentID:     torrentID,
 		client:        p.client,
+		log:           logger.New("posstorage-" + torrentID),
 		files:         make(map[string]fileMetadata),
 		persist: func(value []byte) error {
 			if p.stateStore == nil {
@@ -143,6 +145,7 @@ type Storage struct {
 	prepared      bool
 	files         map[string]fileMetadata
 	client        *http.Client
+	log           logger.Logger
 }
 
 type registrationState uint8
@@ -285,11 +288,14 @@ func (s *Storage) persistRegistration(downloadID int64) error {
 }
 
 func (s *Storage) register(ctx context.Context, retry bool) (createResponse, bool, error) {
-	request := doRequestOnce
+	var resp *http.Response
+	var err error
+	var retryStats registrationRetryStats
 	if retry {
-		request = doRequest
+		resp, retryStats, err = s.doRequest(ctx, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", s.registrationBody)
+	} else {
+		resp, err = doRequestOnce(ctx, s.client, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", s.registrationBody)
 	}
-	resp, err := request(ctx, s.client, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", s.registrationBody)
 	if err != nil {
 		return createResponse{}, false, fmt.Errorf("registering POS rain download: %w", err)
 	}
@@ -313,7 +319,66 @@ func (s *Storage) register(ctx context.Context, retry bool) (createResponse, boo
 	if err := validateCreateResponse(s.registrationRequest, result); err != nil {
 		return createResponse{}, false, fmt.Errorf("validating POS rain download: %w", err)
 	}
+	if retryStats.failures > 0 {
+		s.log.Infof("POS registration recovered: torrent_id=%s attempts=%d elapsed=%s",
+			s.torrentID, retryStats.attempts, time.Since(retryStats.started).Truncate(time.Second))
+	}
 	return result, resp.StatusCode == http.StatusOK, nil
+}
+
+type registrationRetryStats struct {
+	started  time.Time
+	attempts int
+	failures int
+}
+
+func (s *Storage) doRequest(ctx context.Context, method, requestURL, contentType string, body []byte) (*http.Response, registrationRetryStats, error) {
+	stats := registrationRetryStats{started: time.Now()}
+	var failures int
+	var lastFailureLog time.Time
+	for attempt := 0; ; attempt++ {
+		stats.attempts = attempt + 1
+		delay := retryDelays[min(attempt, len(retryDelays)-1)]
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, stats, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		resp, err := doRequestOnce(ctx, s.client, method, requestURL, contentType, body)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, stats, err
+			}
+			failures++
+			stats.failures = failures
+			now := time.Now()
+			if lastFailureLog.IsZero() || now.Sub(lastFailureLog) >= time.Minute {
+				retryIn := retryDelays[min(attempt+1, len(retryDelays)-1)]
+				s.log.Warningf("POS registration unavailable: torrent_id=%s status=transport_error error=%q retry_in=%s attempt=%d",
+					s.torrentID, err, retryIn, attempt+1)
+				lastFailureLog = now
+			}
+			continue
+		}
+		switch resp.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			message, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			failures++
+			stats.failures = failures
+			now := time.Now()
+			if lastFailureLog.IsZero() || now.Sub(lastFailureLog) >= time.Minute {
+				retryIn := retryDelays[min(attempt+1, len(retryDelays)-1)]
+				s.log.Warningf("POS registration unavailable: torrent_id=%s status=%d error=%q retry_in=%s attempt=%d",
+					s.torrentID, resp.StatusCode, strings.TrimSpace(string(message)), retryIn, attempt+1)
+				lastFailureLog = now
+			}
+			continue
+		}
+		return resp, stats, nil
+	}
 }
 
 func (s *Storage) saveRegistration(result createResponse, existing bool) {
@@ -524,7 +589,7 @@ func (f *File) WriteVerifiedAt(p []byte, off int64) (int, error) {
 
 func (f *File) writeRange(p []byte, off int64) (int, error) {
 	u := f.writeURL(off, int64(len(p)))
-	resp, err := doRequest(f.ctx, f.client, http.MethodPatch, u, "application/octet-stream", p)
+	resp, err := doRetriedRequest(f.ctx, f.client, http.MethodPatch, u, "application/octet-stream", p)
 	if err != nil {
 		return 0, fmt.Errorf("writing POS range: %w", err)
 	}
@@ -580,7 +645,7 @@ func (f *File) readRange(p []byte, off int64) (int, error) {
 			case <-time.After(delay):
 			}
 		}
-		resp, err := doRequest(f.ctx, f.client, http.MethodGet, requestURL, "", nil)
+		resp, err := doRetriedRequest(f.ctx, f.client, http.MethodGet, requestURL, "", nil)
 		if err != nil {
 			return 0, fmt.Errorf("reading POS range: %w", err)
 		}
@@ -599,7 +664,7 @@ func (f *File) readRange(p []byte, off int64) (int, error) {
 	}
 }
 
-func doRequest(ctx context.Context, client *http.Client, method, requestURL, contentType string, body []byte) (*http.Response, error) {
+func doRetriedRequest(ctx context.Context, client *http.Client, method, requestURL, contentType string, body []byte) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		delay := retryDelays[min(attempt, len(retryDelays)-1)]
 		if delay > 0 {
