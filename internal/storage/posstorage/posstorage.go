@@ -292,9 +292,9 @@ func (s *Storage) register(ctx context.Context, retry bool) (createResponse, boo
 	var err error
 	var retryStats registrationRetryStats
 	if retry {
-		resp, retryStats, err = s.doRequest(ctx, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", s.registrationBody)
+		resp, retryStats, err = s.doRequest(ctx, http.MethodPost, s.controllerURL+"/v1/rain/downloads", "application/json", s.registrationBody)
 	} else {
-		resp, err = doRequestOnce(ctx, s.client, http.MethodPost, s.controllerURL+"/v2/rain/downloads", "application/json", s.registrationBody)
+		resp, err = doRequestOnce(ctx, s.client, http.MethodPost, s.controllerURL+"/v1/rain/downloads", "application/json", s.registrationBody)
 	}
 	if err != nil {
 		return createResponse{}, false, fmt.Errorf("registering POS rain download: %w", err)
@@ -465,7 +465,7 @@ func (s *Storage) recoverRegistration(ctx context.Context) (int64, error) {
 }
 
 func (s *Storage) cancelDownload(ctx context.Context, downloadID int64) error {
-	requestURL := s.controllerURL + "/v2/rain/downloads/" + strconv.FormatInt(downloadID, 10) + "/cancel"
+	requestURL := s.controllerURL + "/v1/rain/downloads/" + strconv.FormatInt(downloadID, 10) + "/cancel"
 	resp, err := doRequestOnce(ctx, s.client, http.MethodPost, requestURL, "", nil)
 	if err != nil {
 		return fmt.Errorf("canceling POS rain download %d: %w", downloadID, err)
@@ -708,14 +708,14 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, requestURL,
 
 func (f *File) writeURL(off, length int64) string {
 	global := f.globalOffset + off
-	return f.storeURL + "/v2/rain/downloads/" + strconv.FormatInt(f.downloadID, 10) +
+	return f.storeURL + "/v1/rain/downloads/" + strconv.FormatInt(f.downloadID, 10) +
 		"/blob?offset=" + url.QueryEscape(strconv.FormatInt(global, 10)) +
 		"&length=" + url.QueryEscape(strconv.FormatInt(length, 10))
 }
 
 func (f *File) readURL(off, length int64) string {
 	global := f.globalOffset + off
-	return f.storeURL + "/v2/rain/downloads/" + strconv.FormatInt(f.downloadID, 10) +
+	return f.storeURL + "/v1/rain/downloads/" + strconv.FormatInt(f.downloadID, 10) +
 		"?offset=" + url.QueryEscape(strconv.FormatInt(global, 10)) +
 		"&length=" + url.QueryEscape(strconv.FormatInt(length, 10))
 }

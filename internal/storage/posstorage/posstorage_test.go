@@ -46,7 +46,7 @@ func TestFileWritesMapFileOffsetToTorrentOffset(t *testing.T) {
 			if n != 4 {
 				t.Fatalf("wrote %d bytes, want 4", n)
 			}
-			if gotPath != "/v2/rain/downloads/7/blob" || gotOffset != "123" || gotLength != "4" || gotBody != "rain" {
+			if gotPath != "/v1/rain/downloads/7/blob" || gotOffset != "123" || gotLength != "4" || gotBody != "rain" {
 				t.Fatalf("request = path %q offset %q length %q body %q", gotPath, gotOffset, gotLength, gotBody)
 			}
 		})
