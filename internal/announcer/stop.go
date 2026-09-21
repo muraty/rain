@@ -43,6 +43,9 @@ func (a *StopAnnouncer) Run() {
 	defer close(a.doneC)
 
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(a.timeout))
+	// Releases the goroutine below when announcing finishes before the deadline and nobody
+	// closes the announcer.
+	defer cancel()
 	go func() {
 		select {
 		case <-ctx.Done():
