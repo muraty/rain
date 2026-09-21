@@ -349,7 +349,7 @@ func newTorrent(
 		verifierResultC:           make(chan *verifier.Verifier),
 		connectedPeerIPs:          make(map[string]struct{}),
 		bannedPeerIPs:             make(map[string]struct{}),
-		announcersStoppedC:        make(chan struct{}),
+		announcersStoppedC:        make(chan struct{}, 1), // buffered so a detached stop announcer can finish
 		dhtPeersC:                 make(chan []*net.TCPAddr, 1),
 		externalIP:                externalip.FirstExternalIP(),
 		downloadSpeed:             metrics.NilMeter{},
