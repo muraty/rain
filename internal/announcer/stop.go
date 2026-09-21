@@ -38,6 +38,11 @@ func (a *StopAnnouncer) Close() {
 	<-a.doneC
 }
 
+// Done returns a channel that is closed when the announcer has finished.
+func (a *StopAnnouncer) Done() <-chan struct{} {
+	return a.doneC
+}
+
 // Run the announcer.
 func (a *StopAnnouncer) Run() {
 	defer close(a.doneC)

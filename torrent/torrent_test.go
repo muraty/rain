@@ -38,7 +38,7 @@ func TestMain(m *testing.M) {
 	)
 }
 
-func newTestSession(t *testing.T) *Session {
+func newTestConfig(t *testing.T) Config {
 	t.Helper()
 	tmp := t.TempDir()
 	cfg := DefaultConfig
@@ -48,7 +48,12 @@ func newTestSession(t *testing.T) *Session {
 	cfg.PEXEnabled = false
 	cfg.RPCEnabled = false
 	cfg.Host = "127.0.0.1"
-	s, err := NewSession(cfg)
+	return cfg
+}
+
+func newTestSession(t *testing.T) *Session {
+	t.Helper()
+	s, err := NewSession(newTestConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
