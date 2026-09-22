@@ -151,6 +151,23 @@ func TestStopAnnouncer(t *testing.T) {
 	assert.Equal(t, tracker.EventStopped, recvEvent(t, t1))
 }
 
+// A closed torrent leaves its stop announcer running and never reads the result.
+// The announcer must still finish so that Session.Close can wait for it.
+func TestStopAnnouncerUnread(t *testing.T) {
+	trk := &fakeTracker{url: "t0", events: make(chan tracker.Event, 1)}
+
+	resultC := make(chan struct{}, 1)
+	a := NewStopAnnouncer([]tracker.Tracker{trk}, testTorrent(), testTimeout, resultC, logger.New("test"))
+	go a.Run()
+
+	select {
+	case <-a.Done():
+	case <-time.After(testTimeout):
+		t.Fatal("stop announcer did not finish")
+	}
+	assert.Equal(t, tracker.EventStopped, recvEvent(t, trk))
+}
+
 func TestDHTAnnouncer(t *testing.T) {
 	var mu sync.Mutex
 	var count int

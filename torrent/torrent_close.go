@@ -15,9 +15,12 @@ func (t *torrent) close() {
 	// Stop if running.
 	t.stop(errClosed)
 
-	// Maybe we are in "Stopping" state. Close "stopped" event announcer.
-	if t.stoppedEventAnnouncer != nil {
-		t.stoppedEventAnnouncer.Close()
+	// Maybe we are in "Stopping" state. Leave the "stopped" event announcer running. Closing it
+	// cancels the announce in flight, so the trackers never learn how much we have uploaded since
+	// the last periodical announce. It stops by itself after TrackerStopTimeout.
+	// Session.Close waits for it before closing the tracker transports.
+	if a := t.stoppedEventAnnouncer; a != nil {
+		t.session.detachedAnnouncers.Go(func() { <-a.Done() })
 	}
 
 	t.downloadSpeed.Stop()

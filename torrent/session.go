@@ -62,6 +62,9 @@ type Session struct {
 	bucketUpload   *ratelimit.Bucket
 	closeC         chan struct{}
 
+	// "stopped" event announcers of closed torrents, still running in the background.
+	detachedAnnouncers sync.WaitGroup
+
 	mPeerRequests   sync.Mutex
 	dhtPeerRequests map[*torrent]struct{}
 
@@ -282,6 +285,7 @@ func (s *Session) getTrackerUserAgent(private bool) string {
 }
 
 // Close stops all torrents and release the resources.
+// It waits for the "stopped" events to be announced to the trackers, at most for Config.TrackerStopTimeout.
 func (s *Session) Close() error {
 	close(s.closeC)
 
@@ -313,6 +317,8 @@ func (s *Session) Close() error {
 
 	s.ram.Close()
 	s.pieceCache.Close()
+	// Announcers share the transports in trackerManager. Their timeout bounds the wait.
+	s.detachedAnnouncers.Wait()
 	s.trackerManager.Close()
 	s.metrics.Close()
 	return s.db.Close()
@@ -354,6 +360,7 @@ func (s *Session) GetTorrent(id string) *Torrent {
 }
 
 // RemoveTorrent removes the torrent from the session and delete its files.
+// A "stopped" event is announced to the trackers in the background; RemoveTorrent does not wait for it.
 func (s *Session) RemoveTorrent(id string, keepData bool) error {
 	t, err := s.removeTorrentFromClient(id)
 	if t != nil {
