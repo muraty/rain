@@ -19,9 +19,10 @@ import (
 )
 
 type Provider struct {
-	controllerURL string
-	client        *http.Client
-	stateStore    StateStore
+	controllerURL   string
+	controllerToken string
+	client          *http.Client
+	stateStore      StateStore
 }
 
 const maxPOSRangeSize = 128 << 20
@@ -44,7 +45,7 @@ var retryDelays = []time.Duration{
 	15 * time.Second,
 }
 
-func NewProvider(controllerURL string, timeout time.Duration) (*Provider, error) {
+func NewProvider(controllerURL, controllerToken string, timeout time.Duration) (*Provider, error) {
 	controllerURL = strings.TrimRight(controllerURL, "/")
 	parsed, err := url.Parse(controllerURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -53,8 +54,9 @@ func NewProvider(controllerURL string, timeout time.Duration) (*Provider, error)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 32
 	return &Provider{
-		controllerURL: controllerURL,
-		client:        &http.Client{Transport: transport, Timeout: timeout},
+		controllerURL:   controllerURL,
+		controllerToken: controllerToken,
+		client:          &http.Client{Transport: transport, Timeout: timeout},
 	}, nil
 }
 
@@ -72,11 +74,12 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 	}
 	registrationCtx, cancelRegistration := context.WithCancel(context.Background())
 	s := &Storage{
-		controllerURL: p.controllerURL,
-		torrentID:     torrentID,
-		client:        p.client,
-		log:           logger.New("posstorage-" + torrentID),
-		files:         make(map[string]fileMetadata),
+		controllerURL:   p.controllerURL,
+		controllerToken: p.controllerToken,
+		torrentID:       torrentID,
+		client:          p.client,
+		log:             logger.New("posstorage-" + torrentID),
+		files:           make(map[string]fileMetadata),
 		persist: func(value []byte) error {
 			if p.stateStore == nil {
 				return nil
@@ -136,16 +139,17 @@ type Storage struct {
 	cancelRegistration    context.CancelFunc
 	persist               func([]byte) error
 
-	mu            sync.RWMutex
-	controllerURL string
-	torrentID     string
-	downloadID    int64
-	storeURL      string
-	existing      bool
-	prepared      bool
-	files         map[string]fileMetadata
-	client        *http.Client
-	log           logger.Logger
+	mu              sync.RWMutex
+	controllerURL   string
+	controllerToken string
+	torrentID       string
+	downloadID      int64
+	storeURL        string
+	existing        bool
+	prepared        bool
+	files           map[string]fileMetadata
+	client          *http.Client
+	log             logger.Logger
 }
 
 type registrationState uint8
@@ -294,7 +298,7 @@ func (s *Storage) register(ctx context.Context, retry bool) (createResponse, boo
 	if retry {
 		resp, retryStats, err = s.doRequest(ctx, http.MethodPost, s.controllerURL+"/v1/rain/downloads", "application/json", s.registrationBody)
 	} else {
-		resp, err = doRequestOnce(ctx, s.client, http.MethodPost, s.controllerURL+"/v1/rain/downloads", "application/json", s.registrationBody)
+		resp, err = doRequestOnce(ctx, s.client, s.controllerToken, http.MethodPost, s.controllerURL+"/v1/rain/downloads", "application/json", s.registrationBody)
 	}
 	if err != nil {
 		return createResponse{}, false, fmt.Errorf("registering POS rain download: %w", err)
@@ -346,7 +350,7 @@ func (s *Storage) doRequest(ctx context.Context, method, requestURL, contentType
 			case <-time.After(delay):
 			}
 		}
-		resp, err := doRequestOnce(ctx, s.client, method, requestURL, contentType, body)
+		resp, err := doRequestOnce(ctx, s.client, s.controllerToken, method, requestURL, contentType, body)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, stats, err
@@ -466,7 +470,7 @@ func (s *Storage) recoverRegistration(ctx context.Context) (int64, error) {
 
 func (s *Storage) cancelDownload(ctx context.Context, downloadID int64) error {
 	requestURL := s.controllerURL + "/v1/rain/downloads/" + strconv.FormatInt(downloadID, 10) + "/cancel"
-	resp, err := doRequestOnce(ctx, s.client, http.MethodPost, requestURL, "", nil)
+	resp, err := doRequestOnce(ctx, s.client, s.controllerToken, http.MethodPost, requestURL, "", nil)
 	if err != nil {
 		return fmt.Errorf("canceling POS rain download %d: %w", downloadID, err)
 	}
@@ -674,7 +678,7 @@ func doRetriedRequest(ctx context.Context, client *http.Client, method, requestU
 			case <-time.After(delay):
 			}
 		}
-		resp, err := doRequestOnce(ctx, client, method, requestURL, contentType, body)
+		resp, err := doRequestOnce(ctx, client, "", method, requestURL, contentType, body)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, err
@@ -691,7 +695,7 @@ func doRetriedRequest(ctx context.Context, client *http.Client, method, requestU
 	}
 }
 
-func doRequestOnce(ctx context.Context, client *http.Client, method, requestURL, contentType string, body []byte) (*http.Response, error) {
+func doRequestOnce(ctx context.Context, client *http.Client, controllerToken, method, requestURL, contentType string, body []byte) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -702,6 +706,14 @@ func doRequestOnce(ctx context.Context, client *http.Client, method, requestURL,
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if controllerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+controllerToken)
+		authClient := *client
+		authClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		return authClient.Do(req)
 	}
 	return client.Do(req)
 }

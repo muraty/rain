@@ -52,7 +52,9 @@ func prepareConfig(c *cli.Context) (torrent.Config, error) {
 				return cfg, err
 			}
 			log.Infoln("config loaded from:", cp)
-			b, err = yaml.Marshal(&cfg)
+			loggedConfig := cfg
+			loggedConfig.POSControllerToken = ""
+			b, err = yaml.Marshal(&loggedConfig)
 			if err != nil {
 				return cfg, err
 			}

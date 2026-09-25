@@ -206,7 +206,8 @@ type Config struct {
 	CustomStorage storage.Provider `yaml:"-"`
 	// POSController enables the POS-backed storage provider. Empty keeps the
 	// existing local file storage provider.
-	POSController string `yaml:"pos-controller"`
+	POSController      string `yaml:"pos-controller"`
+	POSControllerToken string `yaml:"pos-controller-token" json:"-"`
 	// Total timeout for each request to the POS controller.
 	POSControllerTimeout time.Duration `yaml:"pos-controller-timeout"`
 
