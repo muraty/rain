@@ -73,6 +73,7 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 		}
 	}
 	registrationCtx, cancelRegistration := context.WithCancel(context.Background())
+	filesCtx, cancelFiles := context.WithCancel(context.Background())
 	s := &Storage{
 		controllerURL:   p.controllerURL,
 		controllerToken: p.controllerToken,
@@ -88,6 +89,8 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 		},
 		registrationCtx:    registrationCtx,
 		cancelRegistration: cancelRegistration,
+		filesCtx:           filesCtx,
+		cancelFiles:        cancelFiles,
 	}
 	if len(state) == 0 {
 		return s, nil
@@ -137,7 +140,10 @@ type Storage struct {
 	cancellationConfirmed bool
 	registrationCtx       context.Context
 	cancelRegistration    context.CancelFunc
-	persist               func([]byte) error
+	// filesCtx is the parent of every opened file's context.
+	filesCtx    context.Context
+	cancelFiles context.CancelFunc
+	persist     func([]byte) error
 
 	mu              sync.RWMutex
 	controllerURL   string
@@ -408,6 +414,10 @@ func (s *Storage) Cancel(ctx context.Context) error {
 	// This signal does not require registrationMu, so it interrupts Prepare's
 	// active HTTP request before Cancel waits for Prepare to release the mutex.
 	s.cancelRegistration()
+	// Stop in-flight and future file requests before canceling the POS
+	// download. A write whose body POS already received may still be handled
+	// after the cancellation; POS rejects or cleans up such writes.
+	s.cancelFiles()
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
 	s.canceled = true
@@ -526,7 +536,7 @@ func (s *Storage) Open(name string, size int64) (storage.File, bool, error) {
 	if metadata.Size != size {
 		return nil, false, fmt.Errorf("file %q size changed from %d to %d", name, metadata.Size, size)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.filesCtx)
 	return &File{
 		downloadID: s.downloadID, storeURL: s.storeURL,
 		globalOffset: metadata.GlobalOffset, size: metadata.Size, client: s.client,

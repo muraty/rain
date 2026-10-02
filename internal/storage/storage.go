@@ -55,7 +55,9 @@ type Preparer interface {
 // Canceler is implemented by storage backends that own an external resource
 // which must be canceled before Rain forgets the torrent. Cancel must be safe
 // to call concurrently and repeatedly. A returned error means cancellation was
-// not confirmed and the torrent must not be removed.
+// not confirmed and the torrent must not be removed. A failed Cancel may still
+// have stopped the storage's file reads and writes, so the torrent stays in
+// the session but cannot store or serve data until a retried removal succeeds.
 type Canceler interface {
 	Cancel(context.Context) error
 }
