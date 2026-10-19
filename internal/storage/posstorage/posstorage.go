@@ -21,6 +21,7 @@ import (
 type Provider struct {
 	controllerURL   string
 	controllerToken string
+	preferredHost   string
 	client          *http.Client
 	stateStore      StateStore
 }
@@ -45,7 +46,7 @@ var retryDelays = []time.Duration{
 	15 * time.Second,
 }
 
-func NewProvider(controllerURL, controllerToken string, timeout time.Duration) (*Provider, error) {
+func NewProvider(controllerURL, controllerToken, preferredHost string, timeout time.Duration) (*Provider, error) {
 	controllerURL = strings.TrimRight(controllerURL, "/")
 	parsed, err := url.Parse(controllerURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -56,6 +57,7 @@ func NewProvider(controllerURL, controllerToken string, timeout time.Duration) (
 	return &Provider{
 		controllerURL:   controllerURL,
 		controllerToken: controllerToken,
+		preferredHost:   preferredHost,
 		client:          &http.Client{Transport: transport, Timeout: timeout},
 	}, nil
 }
@@ -77,6 +79,7 @@ func (p *Provider) GetStorage(torrentID string) (storage.Storage, error) {
 	s := &Storage{
 		controllerURL:   p.controllerURL,
 		controllerToken: p.controllerToken,
+		preferredHost:   p.preferredHost,
 		torrentID:       torrentID,
 		client:          p.client,
 		log:             logger.New("posstorage-" + torrentID),
@@ -148,6 +151,7 @@ type Storage struct {
 	mu              sync.RWMutex
 	controllerURL   string
 	controllerToken string
+	preferredHost   string
 	torrentID       string
 	downloadID      int64
 	storeURL        string
@@ -178,6 +182,7 @@ type createRequest struct {
 	RainTorrentID string           `json:"rain_torrent_id"`
 	InfoHash      string           `json:"info_hash"`
 	TotalSize     int64            `json:"total_size"`
+	PreferredHost string           `json:"preferred_host,omitempty"`
 	Metadata      downloadMetadata `json:"metadata"`
 }
 
@@ -233,6 +238,7 @@ func (s *Storage) Prepare(ctx context.Context, manifest storage.Manifest) error 
 			RainTorrentID: s.torrentID,
 			InfoHash:      manifest.InfoHash,
 			TotalSize:     manifest.TotalSize,
+			PreferredHost: s.preferredHost,
 			Metadata: downloadMetadata{
 				Name: manifest.Name, PieceLength: manifest.PieceLength, PieceCount: manifest.PieceCount,
 				Files: make([]fileMetadata, len(manifest.Files)),

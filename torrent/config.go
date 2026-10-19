@@ -208,6 +208,9 @@ type Config struct {
 	// existing local file storage provider.
 	POSController      string `yaml:"pos-controller"`
 	POSControllerToken string `yaml:"pos-controller-token" json:"-"`
+	// POSPreferredHost asks the POS controller to place new downloads on the
+	// named store host when it is eligible.
+	POSPreferredHost string `yaml:"pos-preferred-host"`
 	// Total timeout for each request to the POS controller.
 	POSControllerTimeout time.Duration `yaml:"pos-controller-timeout"`
 
