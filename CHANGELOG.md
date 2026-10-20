@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-10-19
+
+### Fixed
+
+- Announces to a UDP tracker that stops responding now give up after two
+  minutes, so the next tracker in the tier is tried, instead of retrying
+  forever. Retries also stop sending an expired connection ID.
+
+## [2.4.3] - 2026-10-10
+
+### Added
+
+- Support plain address ranges, PeerGuardian/P2P and eMule `ipfilter.dat`
+  formats in the IP blocklist, in addition to CIDR.
+
+## [2.4.2] - 2026-10-03
+
+### Changed
+
+- Building requires Go 1.26.
+- The macOS release is a universal binary that runs natively on Apple Silicon.
+- Homebrew installs from a cask instead of a formula. Existing formula installs
+  are migrated on `brew update`.
+
+### Fixed
+
+- Data race on a torrent's bitfield when a session closes while the torrent is
+  verifying.
+- The console no longer requests stats for every row when the visible columns
+  don't need them.
+
 ## [2.4.1] - 2026-09-21
 
 ### Fixed

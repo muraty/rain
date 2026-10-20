@@ -5,6 +5,7 @@ package udptracker
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -22,6 +23,8 @@ import (
 const (
 	connectionIDMagic    = 0x41727101980
 	connectionIDInterval = time.Minute
+	// Lets the tracker tier advance when a tracker stops responding.
+	announceTimeout = 2 * time.Minute
 )
 
 // Transport for UDP tracker implementation.
@@ -65,6 +68,9 @@ func (t *Transport) Close() {
 // Do sends the transaction to the tracker. Retries on failure.
 func (t *Transport) Do(req *transportRequest) ([]byte, error) {
 	var errTransportClosed = errors.New("udp transport closed")
+	ctx, cancel := context.WithTimeout(req.ctx, announceTimeout)
+	defer cancel()
+	req.ctx = ctx
 
 	select {
 	case t.requestC <- req:
@@ -87,9 +93,17 @@ func (t *Transport) Do(req *transportRequest) ([]byte, error) {
 
 func (t *Transport) Run() {
 	t.log.Debugln("Starting transport run loop")
-	var listening bool
 	var laddr net.UDPAddr
 	udpConn, listenErr := net.ListenUDP("udp4", &laddr)
+	if listenErr != nil {
+		t.run(nil, listenErr)
+		return
+	}
+	t.run(udpConn, nil)
+}
+
+func (t *Transport) run(udpConn net.PacketConn, listenErr error) {
+	var listening bool
 	if listenErr != nil {
 		t.log.Error(listenErr)
 	} else {
@@ -141,7 +155,7 @@ func (t *Transport) Run() {
 					if err != nil {
 						req.SetResponse(nil, err)
 					} else {
-						go retryTransaction(trx, udpConn, conn.addr)
+						go retryTransaction(trx, udpConn, conn.addr, conn.connectedAt.Add(connectionIDInterval))
 					}
 				} else {
 					// Connection is in connecting state.
@@ -189,7 +203,7 @@ func (t *Transport) Run() {
 				if err != nil {
 					req.SetResponse(nil, err)
 				} else {
-					go retryTransaction(trx, udpConn, conn.addr)
+					go retryTransaction(trx, udpConn, conn.addr, conn.connectedAt.Add(connectionIDInterval))
 				}
 			}
 
@@ -254,12 +268,12 @@ func (t *Transport) Run() {
 }
 
 // readLoop reads datagrams from connection and sends to the run loop.
-func (t *Transport) readLoop(conn net.Conn) {
+func (t *Transport) readLoop(conn net.PacketConn) {
 	// Read buffer must be big enough to hold a UDP packet of maximum expected size.
 	const maxNumWant = 1000
 	bigBuf := make([]byte, 20+6*maxNumWant)
 	for {
-		n, err := conn.Read(bigBuf)
+		n, _, err := conn.ReadFrom(bigBuf)
 		if err != nil {
 			select {
 			case <-t.closeC:
@@ -289,7 +303,7 @@ type connectionResult struct {
 	connectedAt time.Time
 }
 
-func resolveDestinationAndConnect(trx *transaction, dest string, udpConn *net.UDPConn, dnsTimeout time.Duration, blocklist *blocklist.Blocklist, resultC chan *connectionResult, stopC chan struct{}) {
+func resolveDestinationAndConnect(trx *transaction, dest string, udpConn net.PacketConn, dnsTimeout time.Duration, blocklist *blocklist.Blocklist, resultC chan *connectionResult, stopC chan struct{}) {
 	res := &connectionResult{
 		trx:  trx,
 		dest: dest,
@@ -318,9 +332,9 @@ func resolveDestinationAndConnect(trx *transaction, dest string, udpConn *net.UD
 	}
 }
 
-func sendAndReceiveConnect(trx *transaction, conn *net.UDPConn, addr net.Addr) (connectionID int64, err error) {
+func sendAndReceiveConnect(trx *transaction, conn net.PacketConn, addr net.Addr) (connectionID int64, err error) {
 	// Send request until the transaction is canceled.
-	go retryTransaction(trx, conn, addr)
+	go retryTransaction(trx, conn, addr, time.Time{})
 
 	// Wait until transaction is finished.
 	select {
@@ -350,7 +364,8 @@ func sendAndReceiveConnect(trx *transaction, conn *net.UDPConn, addr net.Addr) (
 // Send the request until the transaction is canceled.
 // Transaction canceled by either via outer context or when response is received from the tracker.
 // It backs off with the algorithm described in BEP15 and retries.
-func retryTransaction(trx *transaction, conn *net.UDPConn, addr net.Addr) {
+// Retries stop at expiresAt because BEP15 does not allow sending an expired connection ID.
+func retryTransaction(trx *transaction, conn net.PacketConn, addr net.Addr, expiresAt time.Time) {
 	var b bytes.Buffer
 	_, _ = trx.request.WriteTo(&b)
 	data := b.Bytes()
@@ -360,6 +375,9 @@ func retryTransaction(trx *transaction, conn *net.UDPConn, addr net.Addr) {
 	for {
 		select {
 		case <-ticker.C:
+			if !expiresAt.IsZero() && !time.Now().Before(expiresAt) {
+				return
+			}
 			_, _ = conn.WriteTo(data, addr)
 		case <-trx.ctx.Done():
 			return
